@@ -57,53 +57,66 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           JIRA_KEY: ${{ inputs.jira_issue_key }}
         run: |
-          PLAN=$(cat docs-plan/plan-meta.json)
-          CONTEXT=$(cat be-artifact/pipeline-context.json)
+          SUMMARY=$(cat docs-plan/plan-meta.json | jq -r '.jira_summary // "FE development"')
+          PLAN_TASKS=$(cat docs-plan/plan-meta.json | jq -r '.claude_plan.fe_tasks // [] | join(", ")')
 
-          # Build request payload
-          PROMPT="다음 개발 계획을 기반으로 React TypeScript FE 컴포넌트 코드를 생성해줘. JIRA Key: $JIRA_KEY. 개발 계획: $PLAN. 반드시 아래 JSON 형식으로만 응답해줘 (마크다운 없이 순수 JSON): {\"files\": [{\"path\": \"src/components/Example.tsx\", \"content\": \"// code\"}], \"summary\": \"요약\"}"
+          # Write Python script to file
+          cat > /tmp/call_claude.py << 'SCRIPTEOF'
+          import json, urllib.request, os, re, sys
 
-          python3 -c "
-import json, urllib.request, os
+          plan_file = sys.argv[1]
+          jira_key = os.environ.get("JIRA_KEY", "UNKNOWN")
+          api_key = os.environ.get("ANTHROPIC_API_KEY", "")
 
-with open('docs-plan/plan-meta.json') as f:
-    plan = json.load(f)
-with open('be-artifact/pipeline-context.json') as f:
-    context = json.load(f)
+          with open(plan_file) as f:
+              plan = json.load(f)
 
-jira_key = os.environ.get('JIRA_KEY', 'UNKNOWN')
-api_key = os.environ.get('ANTHROPIC_API_KEY', '')
+          fe_tasks = plan.get("claude_plan", {}).get("fe_tasks", [])
+          summary = plan.get("jira_summary", "FE development")
 
-prompt = f'다음 개발 계획을 기반으로 React TypeScript FE 컴포넌트 코드를 생성해줘. JIRA Key: {jira_key}. 개발 계획: {json.dumps(plan, ensure_ascii=False)}. 반드시 아래 JSON 형식으로만 응답해줘 (마크다운 없이 순수 JSON): {chr(123)}\"files\": [{chr(123)}\"path\": \"src/components/LoginForm.tsx\", \"content\": \"// React component code here\"{chr(125)}], \"summary\": \"생성된 코드 요약\"{chr(125)}'
+          prompt = f"""다음 개발 계획을 기반으로 React TypeScript FE 컴포넌트 코드를 생성해줘.
+JIRA Key: {jira_key}
+기능 요약: {summary}
+FE 태스크: {", ".join(fe_tasks)}
 
-req_data = json.dumps({chr(123)}'model': 'claude-3-5-sonnet-20241022', 'max_tokens': 4096, 'messages': [{chr(123)}'role': 'user', 'content': prompt{chr(125)}]{chr(125)}).encode()
-req = urllib.request.Request('https://api.anthropic.com/v1/messages', data=req_data, headers={'x-api-key': api_key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json'})
+반드시 아래 JSON 형식으로만 응답해줘 (마크다운 없이 순수 JSON):
+{{"files": [{{"path": "src/components/MainComponent.tsx", "content": "import React from 'react';\n\nconst MainComponent: React.FC = () => {{\n  return <div>Hello</div>;\n}};\n\nexport default MainComponent;"}}], "summary": "생성된 코드 요약"}}
+"""
 
-with urllib.request.urlopen(req) as resp:
-    result = json.loads(resp.read())
+          payload = json.dumps({"model": "claude-3-5-sonnet-20241022", "max_tokens": 4096, "messages": [{"role": "user", "content": prompt}]}).encode()
+          req = urllib.request.Request("https://api.anthropic.com/v1/messages", data=payload, headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"})
 
-text = result.get('content', [{}])[0].get('text', '{chr(123)}{chr(125)}')
-print('Claude response:', text[:300])
+          try:
+              with urllib.request.urlopen(req) as resp:
+                  result = json.loads(resp.read())
+              text = result.get("content", [{}])[0].get("text", "{}")
+              print("Claude preview:", text[:200])
+              try:
+                  data = json.loads(text)
+              except Exception:
+                  m = re.search(r"\{[\s\S]*\}", text)
+                  data = json.loads(m.group()) if m else {"files": [], "summary": "parse error"}
+          except Exception as e:
+              print(f"API error: {e}")
+              data = {"files": [], "summary": "API error"}
 
-try:
-    data = json.loads(text)
-except Exception:
-    import re
-    m = re.search(r'{chr(123)}.*{chr(125)}', text, re.DOTALL)
-    data = json.loads(m.group()) if m else {chr(123)}'files': [], 'summary': 'parse failed'{chr(125)}
+          github_output = os.environ.get("GITHUB_OUTPUT", "/dev/null")
+          with open(github_output, "a") as f:
+              f.write(f'fe_summary={data.get("summary", "Claude generated FE code")}\n')
 
-with open(os.environ.get('GITHUB_OUTPUT', '/dev/null'), 'a') as f:
-    f.write(f\"fe_summary={data.get('summary', 'Claude generated FE code')}\\n\")
+          for fi in data.get("files", []):
+              p = fi.get("path", "")
+              c = fi.get("content", "")
+              if p:
+                  d = os.path.dirname(p)
+                  if d:
+                      os.makedirs(d, exist_ok=True)
+                  with open(p, "w") as f:
+                      f.write(c)
+                  print("Created:", p)
+          SCRIPTEOF
 
-for fi in data.get('files', []):
-    p = fi.get('path', '')
-    c = fi.get('content', '')
-    if p:
-        os.makedirs(os.path.dirname(p) if os.path.dirname(p) else '.', exist_ok=True)
-        with open(p, 'w') as f:
-            f.write(c)
-        print('Created:', p)
-"
+          python3 /tmp/call_claude.py docs-plan/plan-meta.json
 
       - name: Create branch and PR
         run: |
@@ -113,7 +126,6 @@ for fi in data.get('files', []):
           git remote set-url origin https://x-access-token:${{ secrets.ORG_PAT }}@github.com/org-pipeline-sophie/org-pipeline-sophie-fe.git
           git checkout -b $BRANCH
           git add src/ 2>/dev/null || true
-          git status
           if git diff --staged --quiet; then
             echo "No Claude files, creating placeholder"
             mkdir -p src
@@ -128,7 +140,7 @@ for fi in data.get('files', []):
             -H "Authorization: token ${{ secrets.ORG_PAT }}" \
             -H "Accept: application/vnd.github.v3+json" \
             https://api.github.com/repos/org-pipeline-sophie/org-pipeline-sophie-fe/pulls \
-            -d "{\"title\": \"[FE] ${{ inputs.jira_issue_key }}: Auto-generated FE code\", \"body\": \"Claude auto-generated FE code for ${{ inputs.jira_issue_key }}\", \"head\": \"$BRANCH\", \"base\": \"main\"}")
+            -d "{\"title\": \"[FE] ${{ inputs.jira_issue_key }}: Auto-generated FE code\", \"body\": \"Claude auto-generated FE code for ${{ inputs.jira_issue_key }}. Issue: #${{ inputs.github_issue_number }}\", \"head\": \"$BRANCH\", \"base\": \"main\"}")
           echo "PR Response: $PR_RESPONSE"
           PR_URL=$(echo $PR_RESPONSE | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('html_url', 'PR creation failed'))")
           echo "PR URL: $PR_URL"
@@ -137,20 +149,17 @@ for fi in data.get('files', []):
       - name: Create FE build result artifact
         run: |
           mkdir -p fe-result
-          cat > fe-result/fe-summary.json << JSONEOF
-          {
-            "jira_issue_key": "${{ inputs.jira_issue_key }}",
-            "github_issue_number": "${{ inputs.github_issue_number }}",
-            "be_run_id": "${{ inputs.be_run_id }}",
-            "docs_run_id": "${{ inputs.docs_run_id }}",
-            "fe_run_id": "${{ github.run_id }}",
-            "fe_sha": "${{ github.sha }}",
-            "status": "success",
-            "fe_summary": "${{ steps.claude_fe.outputs.fe_summary }}",
-            "pr_url": "${{ env.pr_url }}",
-            "branch": "${{ env.branch }}"
-          }
-          JSONEOF
+          echo "{" > fe-result/fe-summary.json
+          echo "  \"jira_issue_key\": \"${{ inputs.jira_issue_key }}\"," >> fe-result/fe-summary.json
+          echo "  \"github_issue_number\": \"${{ inputs.github_issue_number }}\"," >> fe-result/fe-summary.json
+          echo "  \"be_run_id\": \"${{ inputs.be_run_id }}\"," >> fe-result/fe-summary.json
+          echo "  \"docs_run_id\": \"${{ inputs.docs_run_id }}\"," >> fe-result/fe-summary.json
+          echo "  \"fe_run_id\": \"${{ github.run_id }}\"," >> fe-result/fe-summary.json
+          echo "  \"fe_sha\": \"${{ github.sha }}\"," >> fe-result/fe-summary.json
+          echo "  \"status\": \"success\"," >> fe-result/fe-summary.json
+          echo "  \"pr_url\": \"${{ env.pr_url }}\"," >> fe-result/fe-summary.json
+          echo "  \"branch\": \"${{ env.branch }}\"" >> fe-result/fe-summary.json
+          echo "}" >> fe-result/fe-summary.json
           cat fe-result/fe-summary.json
 
       - name: Upload FE artifact
@@ -165,7 +174,7 @@ for fi in data.get('files', []):
             -H "Authorization: token ${{ secrets.ORG_PAT }}" \
             -H "Accept: application/vnd.github.v3+json" \
             https://api.github.com/repos/org-pipeline-sophie/org-pipeline-sophie-be/actions/workflows/receive-fe-result.yml/dispatches \
-            -d '{"ref": "main", "inputs": {"fe_run_id": "${{ github.run_id }}", "jira_issue_key": "${{ inputs.jira_issue_key }}", "github_issue_number": "${{ inputs.github_issue_number }}", "fe_sha": "${{ github.sha }}"}}')
+            -d '{"ref": "main", "inputs": {"fe_run_id": "${{ github.run_id }}", "jira_issue_key": "${{ inputs.jira_issue_key }}", "github_issue_number": "${{ inputs.github_issue_number }}", "fe_sha": "${{ github.sha }}"}}') 
           echo "HTTP Status: $HTTP_STATUS"
           if [ "$HTTP_STATUS" != "204" ]; then
             echo "Failed to trigger BE receive-result workflow"
