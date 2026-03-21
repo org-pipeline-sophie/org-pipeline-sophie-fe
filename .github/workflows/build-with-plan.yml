@@ -5,7 +5,7 @@ on:
     inputs:
       be_run_id:
         description: 'BE workflow run ID'
-        required: tru
+        required: true
       docs_run_id:
         description: 'DOCS workflow run ID'
         required: true
