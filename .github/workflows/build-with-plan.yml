@@ -5,7 +5,7 @@ on:
     inputs:
       be_run_id:
         description: 'BE workflow run ID'
-        required: true
+        required: tru
       docs_run_id:
         description: 'DOCS workflow run ID'
         required: true
@@ -64,7 +64,7 @@ jobs:
 
             // Read artifacts
             const plan = JSON.parse(fs.readFileSync('docs-plan/plan-meta.json', 'utf8'));
-            const context = JSON.parse(fs.readFileSync('be-artifact/pipeline-context.json', 'utf8'));
+            const beContext = JSON.parse(fs.readFileSync('be-artifact/pipeline-context.json', 'utf8'));
 
             const jiraKey = process.env.JIRA_KEY;
             const apiKey = process.env.ANTHROPIC_API_KEY;
