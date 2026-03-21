@@ -1,8 +1,30 @@
 name: FE - Build with BE Artifact and Docs Plan and Send Result to BE
+
+on:
+  workflow_dispatch:
+    inputs:
+      be_run_id:
+        description: 'BE workflow run ID'
+        required: true
+      docs_run_id:
+        description: 'DOCS workflow run ID'
+        required: true
+      jira_issue_key:
+        description: 'JIRA Issue Key'
+        required: true
+      github_issue_number:
+        description: 'GitHub Issue Number'
+        required: true
+
+jobs:
+  build-and-send:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout FE repo
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.ORG_PAT }}
-
 
       - name: Download BE artifact
         uses: actions/download-artifact@v4
@@ -13,7 +35,6 @@ name: FE - Build with BE Artifact and Docs Plan and Send Result to BE
           repository: org-pipeline-sophie/org-pipeline-sophie-be
           run-id: ${{ inputs.be_run_id }}
 
-
       - name: Download DOCS artifact
         uses: actions/download-artifact@v4
         with:
@@ -23,27 +44,24 @@ name: FE - Build with BE Artifact and Docs Plan and Send Result to BE
           repository: org-pipeline-sophie/org-pipeline-sophie-docs
           run-id: ${{ inputs.docs_run_id }}
 
-
       - name: Read artifacts
         run: |
           cat be-artifact/pipeline-context.json
           cat docs-plan/plan-meta.json
-
 
       - name: Generate FE code with Claude
         id: claude_fe
         run: |
           SUMMARY=$(cat docs-plan/plan-meta.json | jq -r '.jira_summary // "FE development"')
           JIRA_KEY="${{ inputs.jira_issue_key }}"
-          PROMPT="JIRA: ${JIRA_KEY} - ${SUMMARY}. Generate React TypeScript. Reply ONLY with JSON: {\"files\":[{\"path\":\"src/components/App.tsx\",\"content\":\"import React from 'react'; export default function App() { return <div>App</div>; }\"}],\"summary\":\"summary\"}"
+          PAYLOAD=$(jq -n --arg jira "$JIRA_KEY" --arg summary "$SUMMARY" '{"model":"claude-3-5-sonnet-20241022","max_tokens":2048,"messages":[{"role":"user","content":("JIRA: " + $jira + " - " + $summary + ". Generate React TypeScript. Reply ONLY with JSON no markdown: {\"files\":[{\"path\":\"src/components/App.tsx\",\"content\":\"import React from react;\"}],\"summary\":\"summary\"}")}]}')
           RESPONSE=$(curl -s -X POST https://api.anthropic.com/v1/messages \
             -H "x-api-key: ${{ secrets.ANTHROPIC_API_KEY }}" \
             -H "anthropic-version: 2023-06-01" \
             -H "content-type: application/json" \
-            -d "{\"model\":\"claude-3-5-sonnet-20241022\",\"max_tokens\":2048,\"messages\":[{\"role\":\"user\",\"content\":\"${PROMPT}\"}]}")
-          echo "Claude response received"
+            -d "$PAYLOAD")
           TEXT=$(echo "$RESPONSE" | jq -r '.content[0].text')
-          echo "Claude text preview: ${TEXT:0:200}"
+          echo "Claude preview: ${TEXT:0:200}"
           FE_SUMMARY=$(echo "$TEXT" | jq -r '.summary // "Claude generated FE code"' 2>/dev/null || echo "Claude generated FE code")
           echo "fe_summary=$FE_SUMMARY" >> $GITHUB_OUTPUT
           mkdir -p src/components
@@ -60,7 +78,6 @@ name: FE - Build with BE Artifact and Docs Plan and Send Result to BE
             echo "// Claude generated" > src/components/App.tsx
           fi
 
-
       - name: Create branch and PR
         run: |
           BRANCH="feature/${{ inputs.jira_issue_key }}-fe-$(date +%s)"
@@ -72,14 +89,50 @@ name: FE - Build with BE Artifact and Docs Plan and Send Result to BE
           git commit -m "[FE] ${{ inputs.jira_issue_key }}: Claude generated FE code"
           git push origin $BRANCH
           echo "branch=$BRANCH" >> $GITHUB_ENV
+          PR_BODY="Claude generated FE code for ${{ inputs.jira_issue_key }}. Issue: #${{ inputs.github_issue_number }}"
+          PR_PAYLOAD=$(jq -n --arg title "[FE] ${{ inputs.jira_issue_key }}: Auto-generated FE code" --arg body "$PR_BODY" --arg head "$BRANCH" --arg base "main" '{title:$title,body:$body,head:$head,base:$base}')
           PR_RESPONSE=$(curl -s -X POST \
             -H "Authorization: token ${{ secrets.ORG_PAT }}" \
             -H "Accept: application/vnd.github.v3+json" \
             https://api.github.com/repos/org-pipeline-sophie/org-pipeline-sophie-fe/pulls \
-            -d "{\"title\":\"[FE] ${{ inputs.jira_issue_key }}: Auto-generated FE code\",\"body\":\"Claude generated. Issue: #${{ inputs.github_issue_number }}\",\"head\":\"$BRANCH\",\"base\":\"main\"}")
+            -d "$PR_PAYLOAD")
           PR_URL=$(echo "$PR_RESPONSE" | jq -r '.html_url // "PR creation failed"')
           echo "PR URL: $PR_URL"
           echo "pr_url=$PR_URL" >> $GITHUB_ENV
 
-
       - name: Create FE build result artifact
+        run: |
+          mkdir -p fe-result
+          jq -n \
+            --arg jira "${{ inputs.jira_issue_key }}" \
+            --arg issue "${{ inputs.github_issue_number }}" \
+            --arg be_run "${{ inputs.be_run_id }}" \
+            --arg docs_run "${{ inputs.docs_run_id }}" \
+            --arg fe_run "${{ github.run_id }}" \
+            --arg fe_sha "${{ github.sha }}" \
+            --arg summary "${{ steps.claude_fe.outputs.fe_summary }}" \
+            --arg pr_url "${{ env.pr_url }}" \
+            --arg branch "${{ env.branch }}" \
+            '{"jira_issue_key":$jira,"github_issue_number":$issue,"be_run_id":$be_run,"docs_run_id":$docs_run,"fe_run_id":$fe_run,"fe_sha":$fe_sha,"status":"success","fe_summary":$summary,"pr_url":$pr_url,"branch":$branch}' \
+            > fe-result/fe-summary.json
+          cat fe-result/fe-summary.json
+
+      - name: Upload FE artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fe-final-artifact
+          path: fe-result/
+
+      - name: Trigger BE receive-result workflow
+        run: |
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+            -H "Authorization: token ${{ secrets.ORG_PAT }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/repos/org-pipeline-sophie/org-pipeline-sophie-be/actions/workflows/receive-fe-result.yml/dispatches \
+            -d '{"ref":"main","inputs":{"fe_run_id":"${{ github.run_id }}","jira_issue_key":"${{ inputs.jira_issue_key }}","github_issue_number":"${{ inputs.github_issue_number }}","fe_sha":"${{ github.sha }}"}}')
+          echo "HTTP Status: $HTTP_STATUS"
+          if [ "$HTTP_STATUS" != "204" ]; then
+            echo "Failed to trigger BE receive-result workflow"
+            exit 1
+          fi
+          echo "Successfully triggered BE receive-fe-result workflow"
