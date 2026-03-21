@@ -44,61 +44,110 @@ jobs:
           repository: org-pipeline-sophie/org-pipeline-sophie-docs
           run-id: ${{ inputs.docs_run_id }}
 
-      - name: Read artifacts
-        run: |
-          cat be-artifact/pipeline-context.json
-          cat docs-plan/plan-meta.json
-
-      - name: Generate FE code with Claude
+      - name: Generate FE code with Claude and create PR
         id: claude_fe
-        run: |
-          SUMMARY=$(cat docs-plan/plan-meta.json | jq -r '.jira_summary // "FE development"')
-          JIRA_KEY="${{ inputs.jira_issue_key }}"
-          PAYLOAD=$(jq -n --arg jira "$JIRA_KEY" --arg summary "$SUMMARY" '{"model":"claude-3-5-sonnet-20241022","max_tokens":2048,"messages":[{"role":"user","content":("JIRA: " + $jira + " - " + $summary + ". Generate React TypeScript. Reply ONLY with JSON no markdown: {\"files\":[{\"path\":\"src/components/App.tsx\",\"content\":\"import React from react;\"}],\"summary\":\"summary\"}")}]}')
-          RESPONSE=$(curl -s -X POST https://api.anthropic.com/v1/messages \
-            -H "x-api-key: ${{ secrets.ANTHROPIC_API_KEY }}" \
-            -H "anthropic-version: 2023-06-01" \
-            -H "content-type: application/json" \
-            -d "$PAYLOAD")
-          TEXT=$(echo "$RESPONSE" | jq -r '.content[0].text')
-          echo "Claude preview: ${TEXT:0:200}"
-          FE_SUMMARY=$(echo "$TEXT" | jq -r '.summary // "Claude generated FE code"' 2>/dev/null || echo "Claude generated FE code")
-          echo "fe_summary=$FE_SUMMARY" >> $GITHUB_OUTPUT
-          mkdir -p src/components
-          FILE_COUNT=$(echo "$TEXT" | jq '.files | length' 2>/dev/null || echo "0")
-          if [ "$FILE_COUNT" -gt "0" ]; then
-            for i in $(seq 0 $((FILE_COUNT - 1))); do
-              FILE_PATH=$(echo "$TEXT" | jq -r ".files[$i].path")
-              FILE_CONTENT=$(echo "$TEXT" | jq -r ".files[$i].content")
-              mkdir -p $(dirname "$FILE_PATH")
-              printf '%s' "$FILE_CONTENT" > "$FILE_PATH"
-              echo "Created: $FILE_PATH"
-            done
-          else
-            echo "// Claude generated" > src/components/App.tsx
-          fi
+        uses: actions/github-script@v7
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ORG_PAT: ${{ secrets.ORG_PAT }}
+          JIRA_KEY: ${{ inputs.jira_issue_key }}
+          ISSUE_NUMBER: ${{ inputs.github_issue_number }}
+          BE_RUN_ID: ${{ inputs.be_run_id }}
+          DOCS_RUN_ID: ${{ inputs.docs_run_id }}
+        with:
+          github-token: ${{ secrets.ORG_PAT }}
+          script: |
+            const fs = require('fs');
+            const https = require('https');
+            const path = require('path');
+            const { execSync } = require('child_process');
 
-      - name: Create branch and PR
-        run: |
-          BRANCH="feature/${{ inputs.jira_issue_key }}-fe-$(date +%s)"
-          git config user.email "pipeline@github.com"
-          git config user.name "Pipeline Bot"
-          git remote set-url origin https://x-access-token:${{ secrets.ORG_PAT }}@github.com/org-pipeline-sophie/org-pipeline-sophie-fe.git
-          git checkout -b $BRANCH
-          git add src/
-          git commit -m "[FE] ${{ inputs.jira_issue_key }}: Claude generated FE code"
-          git push origin $BRANCH
-          echo "branch=$BRANCH" >> $GITHUB_ENV
-          PR_BODY="Claude generated FE code for ${{ inputs.jira_issue_key }}. Issue: #${{ inputs.github_issue_number }}"
-          PR_PAYLOAD=$(jq -n --arg title "[FE] ${{ inputs.jira_issue_key }}: Auto-generated FE code" --arg body "$PR_BODY" --arg head "$BRANCH" --arg base "main" '{title:$title,body:$body,head:$head,base:$base}')
-          PR_RESPONSE=$(curl -s -X POST \
-            -H "Authorization: token ${{ secrets.ORG_PAT }}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            https://api.github.com/repos/org-pipeline-sophie/org-pipeline-sophie-fe/pulls \
-            -d "$PR_PAYLOAD")
-          PR_URL=$(echo "$PR_RESPONSE" | jq -r '.html_url // "PR creation failed"')
-          echo "PR URL: $PR_URL"
-          echo "pr_url=$PR_URL" >> $GITHUB_ENV
+            // Read artifacts
+            const plan = JSON.parse(fs.readFileSync('docs-plan/plan-meta.json', 'utf8'));
+            const context = JSON.parse(fs.readFileSync('be-artifact/pipeline-context.json', 'utf8'));
+
+            const jiraKey = process.env.JIRA_KEY;
+            const apiKey = process.env.ANTHROPIC_API_KEY;
+            const orgPat = process.env.ORG_PAT;
+
+            // Call Claude API
+            const prompt = `JIRA: ${jiraKey} - ${plan.jira_summary || 'FE development'}. FE tasks: ${JSON.stringify(plan.claude_plan?.fe_tasks || [])}. Generate React TypeScript components. Reply ONLY with JSON (no markdown): {"files":[{"path":"src/components/App.tsx","content":"// code here"}],"summary":"summary here"}`;
+
+            const claudeResponse = await new Promise((resolve, reject) => {
+              const data = JSON.stringify({
+                model: 'claude-3-5-sonnet-20241022',
+                max_tokens: 2048,
+                messages: [{ role: 'user', content: prompt }]
+              });
+              const req = https.request({
+                hostname: 'api.anthropic.com',
+                path: '/v1/messages',
+                method: 'POST',
+                headers: {
+                  'x-api-key': apiKey,
+                  'anthropic-version': '2023-06-01',
+                  'content-type': 'application/json',
+                  'content-length': Buffer.byteLength(data)
+                }
+              }, (res) => {
+                let body = '';
+                res.on('data', chunk => body += chunk);
+                res.on('end', () => resolve(JSON.parse(body)));
+              });
+              req.on('error', reject);
+              req.write(data);
+              req.end();
+            });
+
+            const text = claudeResponse.content?.[0]?.text || '{}';
+            console.log('Claude response preview:', text.substring(0, 300));
+
+            let fileData;
+            try {
+              fileData = JSON.parse(text);
+            } catch (e) {
+              const match = text.match(/\{[\s\S]*\}/);
+              fileData = match ? JSON.parse(match[0]) : { files: [], summary: 'parse error' };
+            }
+
+            // Write generated files
+            for (const file of (fileData.files || [])) {
+              const dir = path.dirname(file.path);
+              if (dir) fs.mkdirSync(dir, { recursive: true });
+              fs.writeFileSync(file.path, file.content || '');
+              console.log('Created:', file.path);
+            }
+
+            if (!fileData.files || fileData.files.length === 0) {
+              fs.mkdirSync('src/components', { recursive: true });
+              fs.writeFileSync('src/components/App.tsx', '// Claude generated placeholder');
+              console.log('Created placeholder');
+            }
+
+            // Git operations
+            const branch = `feature/${jiraKey}-fe-${Date.now()}`;
+            execSync('git config user.email "pipeline@github.com"');
+            execSync('git config user.name "Pipeline Bot"');
+            execSync(`git remote set-url origin https://x-access-token:${orgPat}@github.com/org-pipeline-sophie/org-pipeline-sophie-fe.git`);
+            execSync(`git checkout -b ${branch}`);
+            execSync('git add src/');
+            execSync(`git commit -m "[FE] ${jiraKey}: Claude generated FE code"`);
+            execSync(`git push origin ${branch}`);
+
+            // Create PR
+            const pr = await github.rest.pulls.create({
+              owner: 'org-pipeline-sophie',
+              repo: 'org-pipeline-sophie-fe',
+              title: `[FE] ${jiraKey}: Auto-generated FE code`,
+              body: `Claude auto-generated FE code for ${jiraKey}. Issue: #${process.env.ISSUE_NUMBER}\n\n### Summary\n${fileData.summary || 'N/A'}`,
+              head: branch,
+              base: 'main'
+            });
+
+            console.log('PR created:', pr.data.html_url);
+            core.setOutput('fe_summary', fileData.summary || 'Claude generated FE code');
+            core.setOutput('pr_url', pr.data.html_url);
+            core.setOutput('branch', branch);
 
       - name: Create FE build result artifact
         run: |
@@ -111,8 +160,8 @@ jobs:
             --arg fe_run "${{ github.run_id }}" \
             --arg fe_sha "${{ github.sha }}" \
             --arg summary "${{ steps.claude_fe.outputs.fe_summary }}" \
-            --arg pr_url "${{ env.pr_url }}" \
-            --arg branch "${{ env.branch }}" \
+            --arg pr_url "${{ steps.claude_fe.outputs.pr_url }}" \
+            --arg branch "${{ steps.claude_fe.outputs.branch }}" \
             '{"jira_issue_key":$jira,"github_issue_number":$issue,"be_run_id":$be_run,"docs_run_id":$docs_run,"fe_run_id":$fe_run,"fe_sha":$fe_sha,"status":"success","fe_summary":$summary,"pr_url":$pr_url,"branch":$branch}' \
             > fe-result/fe-summary.json
           cat fe-result/fe-summary.json
