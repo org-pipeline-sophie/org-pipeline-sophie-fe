@@ -21,6 +21,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Checkout FE repo
+        uses: actions/checkout@v4
+
       - name: Download BE artifact
         uses: actions/download-artifact@v4
         with:
@@ -46,7 +49,60 @@ jobs:
           echo "=== DOCS Plan ==="
           cat docs-plan/plan-meta.json
 
-      - name: Create FE build result
+      - name: Generate FE code with Claude
+        id: claude_fe
+        run: |
+          PLAN=$(cat docs-plan/plan-meta.json)
+          CONTEXT=$(cat be-artifact/pipeline-context.json)
+
+          RESPONSE=$(curl -s -X POST https://api.anthropic.com/v1/messages \
+            -H "x-api-key: ${{ secrets.ANTHROPIC_API_KEY }}" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            -d "{
+              \"model\": \"claude-3-5-sonnet-20241022\",
+              \"max_tokens\": 4096,
+              \"messages\": [{
+                \"role\": \"user\",
+                \"content\": \"다음 개발 계획을 기반으로 React FE 컴포넌트 코드를 생성해줘.\\n\\n개발 계획: $PLAN\\n컨텍스트: $CONTEXT\\n\\n반드시 아래 JSON 형식으로만 응답해줘:\\n{\\n  \\\"files\\\": [\\n    {\\n      \\\"path\\\": \\\"src/components/ComponentName.tsx\\\",\\n      \\\"content\\\": \\\"// 실제 코드\\\"\\n    }\\n  ],\\n  \\\"summary\\\": \\\"생성된 코드 요약\\\"\\n}\"
+              }]
+            }")
+
+          echo "Claude Response received"
+          RESULT=$(echo $RESPONSE | jq -r '.content[0].text')
+          echo "fe_summary=$(echo $RESULT | jq -r '.summary')" >> $GITHUB_OUTPUT
+
+          # Write generated files
+          echo $RESULT | jq -r '.files[] | .path + "|||" + .content' | while IFS='|||' read -r path content; do
+            mkdir -p $(dirname $path)
+            echo "$content" > $path
+            echo "Created: $path"
+          done
+
+      - name: Create branch and PR
+        run: |
+          BRANCH="feature/${{ inputs.jira_issue_key }}-fe-$(date +%s)"
+          git config user.email "pipeline@github.com"
+          git config user.name "Pipeline Bot"
+          git checkout -b $BRANCH
+          git add -A
+          git diff --staged --quiet || git commit -m "[FE] ${{ inputs.jira_issue_key }}: Claude generated FE code"
+          git push origin $BRANCH
+
+          PR_URL=$(curl -s -X POST \
+            -H "Authorization: token ${{ secrets.ORG_PAT }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/repos/org-pipeline-sophie/org-pipeline-sophie-fe/pulls \
+            -d "{
+              \"title\": \"[FE] ${{ inputs.jira_issue_key }}: Auto-generated FE code\",
+              \"body\": \"## Claude가 자동 생성한 FE 코드\\n\\n**JIRA:** ${{ inputs.jira_issue_key }}\\n**GitHub Issue:** #${{ inputs.github_issue_number }}\\n\\n### 생성 요약\\n${{ steps.claude_fe.outputs.fe_summary }}\",
+              \"head\": \"$BRANCH\",
+              \"base\": \"main\"
+            }" | jq -r '.html_url')
+          echo "PR created: $PR_URL"
+          echo "pr_url=$PR_URL" >> $GITHUB_ENV
+
+      - name: Create FE build result artifact
         run: |
           mkdir -p fe-result
           cat > fe-result/fe-summary.json << JSONEOF
@@ -58,11 +114,8 @@ jobs:
             "fe_run_id": "${{ github.run_id }}",
             "fe_sha": "${{ github.sha }}",
             "status": "success",
-            "build_results": {
-              "components_created": ["LoginForm", "AuthProvider", "LogoutButton"],
-              "pages_created": ["LoginPage", "DashboardPage"],
-              "tests_passed": true
-            }
+            "fe_summary": "${{ steps.claude_fe.outputs.fe_summary }}",
+            "pr_url": "${{ env.pr_url }}"
           }
           JSONEOF
           cat fe-result/fe-summary.json
