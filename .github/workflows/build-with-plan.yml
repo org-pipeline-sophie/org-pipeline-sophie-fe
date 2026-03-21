@@ -23,6 +23,8 @@ jobs:
     steps:
       - name: Checkout FE repo
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.ORG_PAT }}
 
       - name: Download BE artifact
         uses: actions/download-artifact@v4
@@ -74,8 +76,8 @@ jobs:
 
           # Write generated files
           echo $RESULT | jq -r '.files[] | .path + "|||" + .content' | while IFS='|||' read -r path content; do
-            mkdir -p $(dirname $path)
-            echo "$content" > $path
+            mkdir -p $(dirname "$path")
+            echo "$content" > "$path"
             echo "Created: $path"
           done
 
@@ -84,12 +86,13 @@ jobs:
           BRANCH="feature/${{ inputs.jira_issue_key }}-fe-$(date +%s)"
           git config user.email "pipeline@github.com"
           git config user.name "Pipeline Bot"
+          git remote set-url origin https://x-access-token:${{ secrets.ORG_PAT }}@github.com/org-pipeline-sophie/org-pipeline-sophie-fe.git
           git checkout -b $BRANCH
           git add -A
           git diff --staged --quiet || git commit -m "[FE] ${{ inputs.jira_issue_key }}: Claude generated FE code"
           git push origin $BRANCH
 
-          PR_URL=$(curl -s -X POST \
+          PR_RESPONSE=$(curl -s -X POST \
             -H "Authorization: token ${{ secrets.ORG_PAT }}" \
             -H "Accept: application/vnd.github.v3+json" \
             https://api.github.com/repos/org-pipeline-sophie/org-pipeline-sophie-fe/pulls \
@@ -98,7 +101,8 @@ jobs:
               \"body\": \"## Claude가 자동 생성한 FE 코드\\n\\n**JIRA:** ${{ inputs.jira_issue_key }}\\n**GitHub Issue:** #${{ inputs.github_issue_number }}\\n\\n### 생성 요약\\n${{ steps.claude_fe.outputs.fe_summary }}\",
               \"head\": \"$BRANCH\",
               \"base\": \"main\"
-            }" | jq -r '.html_url')
+            }")
+          PR_URL=$(echo $PR_RESPONSE | jq -r '.html_url')
           echo "PR created: $PR_URL"
           echo "pr_url=$PR_URL" >> $GITHUB_ENV
 
