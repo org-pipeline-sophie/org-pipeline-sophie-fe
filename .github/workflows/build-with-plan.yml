@@ -46,77 +46,38 @@ jobs:
 
       - name: Read artifacts
         run: |
-          echo "=== BE Artifact ==="
           cat be-artifact/pipeline-context.json
-          echo "=== DOCS Plan ==="
           cat docs-plan/plan-meta.json
 
       - name: Generate FE code with Claude
         id: claude_fe
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          JIRA_KEY: ${{ inputs.jira_issue_key }}
         run: |
           SUMMARY=$(cat docs-plan/plan-meta.json | jq -r '.jira_summary // "FE development"')
-          PLAN_TASKS=$(cat docs-plan/plan-meta.json | jq -r '.claude_plan.fe_tasks // [] | join(", ")')
-
-          # Write Python script to file
-          cat > /tmp/call_claude.py << 'SCRIPTEOF'
-          import json, urllib.request, os, re, sys
-
-          plan_file = sys.argv[1]
-          jira_key = os.environ.get("JIRA_KEY", "UNKNOWN")
-          api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-
-          with open(plan_file) as f:
-              plan = json.load(f)
-
-          fe_tasks = plan.get("claude_plan", {}).get("fe_tasks", [])
-          summary = plan.get("jira_summary", "FE development")
-
-          prompt = f"""다음 개발 계획을 기반으로 React TypeScript FE 컴포넌트 코드를 생성해줘.
-JIRA Key: {jira_key}
-기능 요약: {summary}
-FE 태스크: {", ".join(fe_tasks)}
-
-반드시 아래 JSON 형식으로만 응답해줘 (마크다운 없이 순수 JSON):
-{{"files": [{{"path": "src/components/MainComponent.tsx", "content": "import React from 'react';\n\nconst MainComponent: React.FC = () => {{\n  return <div>Hello</div>;\n}};\n\nexport default MainComponent;"}}], "summary": "생성된 코드 요약"}}
-"""
-
-          payload = json.dumps({"model": "claude-3-5-sonnet-20241022", "max_tokens": 4096, "messages": [{"role": "user", "content": prompt}]}).encode()
-          req = urllib.request.Request("https://api.anthropic.com/v1/messages", data=payload, headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"})
-
-          try:
-              with urllib.request.urlopen(req) as resp:
-                  result = json.loads(resp.read())
-              text = result.get("content", [{}])[0].get("text", "{}")
-              print("Claude preview:", text[:200])
-              try:
-                  data = json.loads(text)
-              except Exception:
-                  m = re.search(r"\{[\s\S]*\}", text)
-                  data = json.loads(m.group()) if m else {"files": [], "summary": "parse error"}
-          except Exception as e:
-              print(f"API error: {e}")
-              data = {"files": [], "summary": "API error"}
-
-          github_output = os.environ.get("GITHUB_OUTPUT", "/dev/null")
-          with open(github_output, "a") as f:
-              f.write(f'fe_summary={data.get("summary", "Claude generated FE code")}\n')
-
-          for fi in data.get("files", []):
-              p = fi.get("path", "")
-              c = fi.get("content", "")
-              if p:
-                  d = os.path.dirname(p)
-                  if d:
-                      os.makedirs(d, exist_ok=True)
-                  with open(p, "w") as f:
-                      f.write(c)
-                  print("Created:", p)
-          SCRIPTEOF
-
-          python3 /tmp/call_claude.py docs-plan/plan-meta.json
+          JIRA_KEY="${{ inputs.jira_issue_key }}"
+          PROMPT="JIRA: ${JIRA_KEY} - ${SUMMARY}. Generate React TypeScript. Reply ONLY with JSON: {\"files\":[{\"path\":\"src/components/App.tsx\",\"content\":\"import React from 'react'; export default function App() { return <div>App</div>; }\"}],\"summary\":\"summary\"}"
+          RESPONSE=$(curl -s -X POST https://api.anthropic.com/v1/messages \
+            -H "x-api-key: ${{ secrets.ANTHROPIC_API_KEY }}" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            -d "{\"model\":\"claude-3-5-sonnet-20241022\",\"max_tokens\":2048,\"messages\":[{\"role\":\"user\",\"content\":\"${PROMPT}\"}]}")
+          echo "Claude response received"
+          TEXT=$(echo "$RESPONSE" | jq -r '.content[0].text')
+          echo "Claude text preview: ${TEXT:0:200}"
+          FE_SUMMARY=$(echo "$TEXT" | jq -r '.summary // "Claude generated FE code"' 2>/dev/null || echo "Claude generated FE code")
+          echo "fe_summary=$FE_SUMMARY" >> $GITHUB_OUTPUT
+          mkdir -p src/components
+          FILE_COUNT=$(echo "$TEXT" | jq '.files | length' 2>/dev/null || echo "0")
+          if [ "$FILE_COUNT" -gt "0" ]; then
+            for i in $(seq 0 $((FILE_COUNT - 1))); do
+              FILE_PATH=$(echo "$TEXT" | jq -r ".files[$i].path")
+              FILE_CONTENT=$(echo "$TEXT" | jq -r ".files[$i].content")
+              mkdir -p $(dirname "$FILE_PATH")
+              printf '%s' "$FILE_CONTENT" > "$FILE_PATH"
+              echo "Created: $FILE_PATH"
+            done
+          else
+            echo "// Claude generated - ${SUMMARY}" > src/components/App.tsx
+          fi
 
       - name: Create branch and PR
         run: |
@@ -125,41 +86,34 @@ FE 태스크: {", ".join(fe_tasks)}
           git config user.name "Pipeline Bot"
           git remote set-url origin https://x-access-token:${{ secrets.ORG_PAT }}@github.com/org-pipeline-sophie/org-pipeline-sophie-fe.git
           git checkout -b $BRANCH
-          git add src/ 2>/dev/null || true
-          if git diff --staged --quiet; then
-            echo "No Claude files, creating placeholder"
-            mkdir -p src
-            echo "// Claude generated placeholder" > src/placeholder.ts
-            git add src/placeholder.ts
-          fi
+          git add src/
           git commit -m "[FE] ${{ inputs.jira_issue_key }}: Claude generated FE code"
           git push origin $BRANCH
           echo "branch=$BRANCH" >> $GITHUB_ENV
-
           PR_RESPONSE=$(curl -s -X POST \
             -H "Authorization: token ${{ secrets.ORG_PAT }}" \
             -H "Accept: application/vnd.github.v3+json" \
             https://api.github.com/repos/org-pipeline-sophie/org-pipeline-sophie-fe/pulls \
-            -d "{\"title\": \"[FE] ${{ inputs.jira_issue_key }}: Auto-generated FE code\", \"body\": \"Claude auto-generated FE code for ${{ inputs.jira_issue_key }}. Issue: #${{ inputs.github_issue_number }}\", \"head\": \"$BRANCH\", \"base\": \"main\"}")
-          echo "PR Response: $PR_RESPONSE"
-          PR_URL=$(echo $PR_RESPONSE | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('html_url', 'PR creation failed'))")
+            -d "{\"title\":\"[FE] ${{ inputs.jira_issue_key }}: Auto-generated FE code\",\"body\":\"Claude generated. Issue: #${{ inputs.github_issue_number }}\",\"head\":\"$BRANCH\",\"base\":\"main\"}")
+          PR_URL=$(echo "$PR_RESPONSE" | jq -r '.html_url // "PR creation failed"')
           echo "PR URL: $PR_URL"
           echo "pr_url=$PR_URL" >> $GITHUB_ENV
 
       - name: Create FE build result artifact
         run: |
           mkdir -p fe-result
-          echo "{" > fe-result/fe-summary.json
-          echo "  \"jira_issue_key\": \"${{ inputs.jira_issue_key }}\"," >> fe-result/fe-summary.json
-          echo "  \"github_issue_number\": \"${{ inputs.github_issue_number }}\"," >> fe-result/fe-summary.json
-          echo "  \"be_run_id\": \"${{ inputs.be_run_id }}\"," >> fe-result/fe-summary.json
-          echo "  \"docs_run_id\": \"${{ inputs.docs_run_id }}\"," >> fe-result/fe-summary.json
-          echo "  \"fe_run_id\": \"${{ github.run_id }}\"," >> fe-result/fe-summary.json
-          echo "  \"fe_sha\": \"${{ github.sha }}\"," >> fe-result/fe-summary.json
-          echo "  \"status\": \"success\"," >> fe-result/fe-summary.json
-          echo "  \"pr_url\": \"${{ env.pr_url }}\"," >> fe-result/fe-summary.json
-          echo "  \"branch\": \"${{ env.branch }}\"" >> fe-result/fe-summary.json
-          echo "}" >> fe-result/fe-summary.json
+          jq -n \
+            --arg jira "${{ inputs.jira_issue_key }}" \
+            --arg issue "${{ inputs.github_issue_number }}" \
+            --arg be_run "${{ inputs.be_run_id }}" \
+            --arg docs_run "${{ inputs.docs_run_id }}" \
+            --arg fe_run "${{ github.run_id }}" \
+            --arg fe_sha "${{ github.sha }}" \
+            --arg summary "${{ steps.claude_fe.outputs.fe_summary }}" \
+            --arg pr_url "${{ env.pr_url }}" \
+            --arg branch "${{ env.branch }}" \
+            '{"jira_issue_key":$jira,"github_issue_number":$issue,"be_run_id":$be_run,"docs_run_id":$docs_run,"fe_run_id":$fe_run,"fe_sha":$fe_sha,"status":"success","fe_summary":$summary,"pr_url":$pr_url,"branch":$branch}' \
+            > fe-result/fe-summary.json
           cat fe-result/fe-summary.json
 
       - name: Upload FE artifact
@@ -174,7 +128,7 @@ FE 태스크: {", ".join(fe_tasks)}
             -H "Authorization: token ${{ secrets.ORG_PAT }}" \
             -H "Accept: application/vnd.github.v3+json" \
             https://api.github.com/repos/org-pipeline-sophie/org-pipeline-sophie-be/actions/workflows/receive-fe-result.yml/dispatches \
-            -d '{"ref": "main", "inputs": {"fe_run_id": "${{ github.run_id }}", "jira_issue_key": "${{ inputs.jira_issue_key }}", "github_issue_number": "${{ inputs.github_issue_number }}", "fe_sha": "${{ github.sha }}"}}') 
+            -d '{"ref":"main","inputs":{"fe_run_id":"${{ github.run_id }}","jira_issue_key":"${{ inputs.jira_issue_key }}","github_issue_number":"${{ inputs.github_issue_number }}","fe_sha":"${{ github.sha }}"}}')
           echo "HTTP Status: $HTTP_STATUS"
           if [ "$HTTP_STATUS" != "204" ]; then
             echo "Failed to trigger BE receive-result workflow"
