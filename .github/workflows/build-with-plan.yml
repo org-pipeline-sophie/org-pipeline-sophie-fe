@@ -116,7 +116,7 @@ jobs:
                 }, (res) => {
                   let body = '';
                   res.on('data', chunk => body += chunk);
-                  res.on('end', () => resolve(JSON.parse(body)));
+                  res.on('end', () => { try { const p = JSON.parse(body); if (p.error) { reject(new Error('Claude API error: ' + p.error.type + ' - ' + p.error.message)); } else { resolve(p); } } catch(e) { reject(new Error('Failed to parse API response: ' + body.substring(0,200))); } });
                 });
                 req.on('error', reject);
                 req.write(data);
@@ -130,7 +130,10 @@ jobs:
               '너는 React TypeScript 아키텍트야. 사양과 기존 코드를 분석해서 구현할 파일 목록과 각 파일의 역할을 JSON으로만 응답해. 마크다운 코드블록 없이 JSON만.',
               `사양:\n${dashboardSpec}\n\n기존코드 패턴:\n${existingCode}\n\nJIRA: ${jiraKey}\n\n다음 JSON 형식으로 응답:\n{"files":[{"path":"apps/dashboard/components/Foo.tsx","description":"역할 설명","priority":1}],"summary":"전체 계획"}`
             );
-            const planText = planResp.content?.[0]?.text || '{}';
+            const planText = planResp.content?.[0]?.text || '';
+            if (!planText || planText.trim() === '' || planText.trim() === '{}') {
+              throw new Error('Claude returned empty plan. Full response: ' + JSON.stringify(planResp).substring(0, 500));
+            }
             console.log('Plan response:', planText.substring(0, 500));
 
             let implPlan;
@@ -141,6 +144,10 @@ jobs:
               implPlan = m ? JSON.parse(m[0]) : { files: [], summary: 'fallback' };
             }
             console.log('Files to generate:', implPlan.files?.length || 0);
+
+            if (!implPlan.files || implPlan.files.length === 0) {
+              throw new Error('Architecture plan returned 0 files. Plan was: ' + planText.substring(0, 300));
+            }
 
             // Skill 2: 파일별 코드 생성
             console.log('=== Skill 2: Code Generation ===');
@@ -173,6 +180,11 @@ jobs:
             execSync(`git remote set-url origin https://x-access-token:${orgPat}@github.com/org-pipeline-sophie/org-pipeline-sophie-fe.git`);
             execSync(`git checkout -b ${branch}`);
             execSync('git add apps/');
+            const gitStatus = execSync('git status --porcelain').toString().trim();
+            console.log('Git status:', gitStatus);
+            if (!gitStatus) {
+              throw new Error('No changes to commit. Generated files may be identical to existing files.');
+            }
             execSync(`git commit -m "[FE] ${jiraKey}: Claude generated dashboard TODO app"`);
             execSync(`git push origin ${branch}`);
 
