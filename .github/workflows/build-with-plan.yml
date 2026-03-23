@@ -1,5 +1,4 @@
 name: FE - Build with BE Artifact and Docs Plan and Send Result to BE
-
 on:
   workflow_dispatch:
     inputs:
@@ -23,7 +22,6 @@ jobs:
       contents: write
       pull-requests: write
       pages: write
-
     steps:
       - name: Checkout FE repo
         uses: actions/checkout@v4
@@ -65,6 +63,14 @@ jobs:
           echo "=== Existing Code Preview ==="
           head -50 existing-code.txt
 
+      - name: Setup Node.js for Claude SDK
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Anthropic SDK
+        run: npm install @anthropic-ai/sdk
+
       - name: Generate FE code with Claude and create PR
         id: claude_fe
         uses: actions/github-script@v7
@@ -79,13 +85,14 @@ jobs:
           github-token: ${{ secrets.ORG_PAT }}
           script: |
             const fs = require('fs');
-            const https = require('https');
             const path = require('path');
             const { execSync } = require('child_process');
+            const Anthropic = require('./node_modules/@anthropic-ai/sdk');
 
             const jiraKey = process.env.JIRA_KEY;
-            const apiKey = process.env.ANTHROPIC_API_KEY;
             const orgPat = process.env.ORG_PAT;
+
+            const client = new Anthropic.default({ apiKey: process.env.ANTHROPIC_API_KEY });
 
             const dashboardSpec = fs.existsSync('dashboard-spec.md')
               ? fs.readFileSync('dashboard-spec.md', 'utf8')
@@ -96,32 +103,13 @@ jobs:
             const plan = JSON.parse(fs.readFileSync('docs-plan/plan-meta.json', 'utf8'));
 
             async function callClaude(systemPrompt, userContent) {
-              return new Promise((resolve, reject) => {
-                const data = JSON.stringify({
-                  model: 'claude-haiku-4-5',
-                  max_tokens: 4096,
-                  system: systemPrompt,
-                  messages: [{ role: 'user', content: userContent }]
-                });
-                const req = https.request({
-                  hostname: 'api.anthropic.com',
-                  path: '/v1/messages',
-                  method: 'POST',
-                  headers: {
-                    'x-api-key': apiKey,
-                    'anthropic-version': '2023-06-01',
-                    'content-type': 'application/json',
-                    'content-length': Buffer.byteLength(data)
-                  }
-                }, (res) => {
-                  let body = '';
-                  res.on('data', chunk => body += chunk);
-                  res.on('end', () => { try { const p = JSON.parse(body); if (p.error) { reject(new Error('Claude API error: ' + p.error.type + ' - ' + p.error.message)); } else { resolve(p); } } catch(e) { reject(new Error('Failed to parse API response: ' + body.substring(0,200))); } });
-                });
-                req.on('error', reject);
-                req.write(data);
-                req.end();
+              const message = await client.messages.create({
+                model: 'claude-haiku-4-5',
+                max_tokens: 4096,
+                system: systemPrompt,
+                messages: [{ role: 'user', content: userContent }]
               });
+              return message;
             }
 
             // Skill 1: 구현 계획 수립
@@ -130,6 +118,7 @@ jobs:
               '너는 React TypeScript 아키텍트야. 사양과 기존 코드를 분석해서 구현할 파일 목록과 각 파일의 역할을 JSON으로만 응답해. 마크다운 코드블록 없이 JSON만.',
               `사양:\n${dashboardSpec}\n\n기존코드 패턴:\n${existingCode}\n\nJIRA: ${jiraKey}\n\n다음 JSON 형식으로 응답:\n{"files":[{"path":"apps/dashboard/components/Foo.tsx","description":"역할 설명","priority":1}],"summary":"전체 계획"}`
             );
+
             const planText = planResp.content?.[0]?.text || '';
             if (!planText || planText.trim() === '' || planText.trim() === '{}') {
               throw new Error('Claude returned empty plan. Full response: ' + JSON.stringify(planResp).substring(0, 500));
@@ -197,22 +186,16 @@ jobs:
               head: branch,
               base: 'main'
             });
-
             console.log('PR created:', pr.data.html_url);
+
             core.setOutput('fe_summary', implPlan.summary || 'Dashboard TODO App generated');
             core.setOutput('pr_url', pr.data.html_url);
             core.setOutput('pr_number', pr.data.number.toString());
             core.setOutput('branch', branch);
 
-      - name: Setup Node.js for build
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
       - name: Install dependencies and build
         id: build
         run: |
-          # package.json이 없으면 기본 생성
           if [ ! -f package.json ]; then
             cat > package.json << 'EOF'
           {
@@ -239,7 +222,6 @@ jobs:
           }
           EOF
           fi
-          # vite.config.ts 없으면 생성
           if [ ! -f vite.config.ts ]; then
             cat > vite.config.ts << 'EOF'
           import { defineConfig } from 'vite';
@@ -251,7 +233,6 @@ jobs:
           });
           EOF
           fi
-          # index.html 없으면 생성
           if [ ! -f index.html ]; then
             cat > index.html << 'EOF'
           <!DOCTYPE html>
@@ -286,7 +267,6 @@ jobs:
         id: preview
         run: |
           BRANCH_NAME="${{ steps.claude_fe.outputs.branch }}"
-          ENCODED=$(echo "$BRANCH_NAME" | sed 's|/|/|g')
           PREVIEW_URL="https://org-pipeline-sophie.github.io/org-pipeline-sophie-fe/preview/${BRANCH_NAME}/"
           echo "preview_url=${PREVIEW_URL}" >> $GITHUB_OUTPUT
           echo "Preview URL: ${PREVIEW_URL}"
