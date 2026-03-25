@@ -1,29 +1,38 @@
 import React from 'react';
 import { Todo } from '../types/todo';
 
-interface Props {
+interface TodoItemProps {
   todo: Todo;
   onToggle: (id: string) => void;
   onDelete: (id: string) => void;
 }
 
-export function TodoItem({ todo, onToggle, onDelete }: Props) {
+export default function TodoItem({ todo, onToggle, onDelete }: TodoItemProps) {
   return (
-    <li className="flex items-center gap-3 py-3 border-b border-gray-100 last:border-0">
+    <li className="flex items-center gap-3 py-3 px-2 border-b border-gray-100 last:border-0 hover:bg-gray-50 transition-colors">
       <input
         type="checkbox"
         checked={todo.completed}
         onChange={() => onToggle(todo.id)}
         className="w-4 h-4 accent-blue-500 cursor-pointer"
+        aria-label={`${todo.title} 완료 상태`}
       />
-      <span className={`flex-1 text-sm ${todo.completed ? 'line-through text-gray-400' : 'text-gray-700'}`}>
+      <span
+        className={`flex-1 text-sm ${
+          todo.completed
+            ? 'line-through text-gray-400'
+            : 'text-gray-700'
+        }`}
+      >
         {todo.title}
       </span>
-      <span className="text-xs text-gray-400">{todo.createdAt}</span>
+      <span className="text-xs text-gray-400 whitespace-nowrap">
+        {todo.createdAt}
+      </span>
       <button
         onClick={() => onDelete(todo.id)}
-        className="text-red-400 hover:text-red-600 text-sm font-bold ml-1"
-        aria-label="삭제"
+        className="text-red-400 hover:text-red-600 text-sm font-bold ml-2 transition-colors"
+        aria-label={`${todo.title} 삭제`}
       >
         ✕
       </button>
