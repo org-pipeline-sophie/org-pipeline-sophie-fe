@@ -71,97 +71,39 @@ jobs:
 
       - name: Generate FE code with Claude pipeline
         id: claude_fe
-        uses: actions/github-script@v7
+        run: node .github/scripts/run-pipeline.js
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ORG_PAT: ${{ secrets.ORG_PAT }}
           JIRA_KEY: ${{ inputs.jira_issue_key }}
           ISSUE_NUMBER: ${{ inputs.github_issue_number }}
+
+      - name: Create Pull Request
+        id: create_pr
+        uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.ORG_PAT }}
           script: |
             const fs = require('fs');
-            const path = require('path');
-            const { execSync } = require('child_process');
-
-            // 스킬 로드
-            const { planArchitecture } = require('./.github/scripts/skills/plan');
-            const { generateCode } = require('./.github/scripts/skills/codegen');
-
-            // SDK 초기화
-            const Anthropic = require('./node_modules/@anthropic-ai/sdk');
-            const client = new Anthropic.default({ apiKey: process.env.ANTHROPIC_API_KEY });
-
-            const jiraKey = process.env.JIRA_KEY;
-            const orgPat = process.env.ORG_PAT;
-
-            // ===== 1. 데이터 로드 =====
-            const docsSpec = fs.existsSync('docs-plan/plan-meta.json')
-              ? fs.readFileSync('docs-plan/plan-meta.json', 'utf8') : '{}';
-            const spec = fs.existsSync('dashboard-spec.md')
-              ? fs.readFileSync('dashboard-spec.md', 'utf8') : '';
-            const beContext = fs.existsSync('be-artifact/pipeline-context.json')
-              ? fs.readFileSync('be-artifact/pipeline-context.json', 'utf8') : '{}';
-            const existingCode = fs.existsSync('existing-code.txt')
-              ? fs.readFileSync('existing-code.txt', 'utf8').substring(0, 3000) : '';
-
-            // FE 룰 로드 (.fe-pipeline/rules/)
-            const rulesDir = '.fe-pipeline/rules';
-            let rules = '';
-            if (fs.existsSync(rulesDir)) {
-              const ruleFiles = fs.readdirSync(rulesDir).filter(f => f.endsWith('.md'));
-              for (const file of ruleFiles) {
-                rules += fs.readFileSync(path.join(rulesDir, file), 'utf8') + '\n\n';
-              }
-            }
-            console.log('Rules loaded:', rules.length, 'chars');
-            console.log('Spec loaded:', spec.length, 'chars');
-
-            // ===== 2. Skill 1: 아키텍처 계획 =====
-            const plan = await planArchitecture(client, {
-              rules, spec, docsSpec, beContext, existingCode, jiraKey
-            });
-            console.log('Files to generate:', plan.files.length);
-
-            // ===== 3. Skill 2: 코드 생성 =====
-            const generatedFiles = await generateCode(client, {
-              rules, spec, existingCode, plan
-            });
-
-            // ===== 4. 파일 작성 =====
-            for (const file of generatedFiles) {
-              const dir = path.dirname(file.path);
-              fs.mkdirSync(dir, { recursive: true });
-              fs.writeFileSync(file.path, file.content);
-              console.log('Written:', file.path, '(' + file.content.length + ' chars)');
-            }
-
-            // ===== 5. Git + PR =====
-            const branch = \`feature/\${jiraKey}-dashboard-\${Date.now()}\`;
-            execSync('git config user.email "pipeline@github.com"');
-            execSync('git config user.name "Pipeline Bot"');
-            execSync(\`git remote set-url origin https://x-access-token:\${orgPat}@github.com/org-pipeline-sophie/org-pipeline-sophie-fe.git\`);
-            execSync(\`git checkout -b \${branch}\`);
-            execSync('git add apps/');
-            const gitStatus = execSync('git status --porcelain').toString().trim();
-            if (!gitStatus) throw new Error('No changes to commit.');
-            execSync(\`git commit -m "[FE] \${jiraKey}: Claude generated code"\`);
-            execSync(\`git push origin \${branch}\`);
-
+            const result = JSON.parse(fs.readFileSync('pipeline-result.json', 'utf8'));
             const pr = await github.rest.pulls.create({
               owner: 'org-pipeline-sophie',
               repo: 'org-pipeline-sophie-fe',
-              title: \`[FE] \${jiraKey}: Auto-generated Dashboard TODO App\`,
-              body: \`## Claude 자동 생성\n\n**JIRA:** \${jiraKey}\n**Issue:** #\${process.env.ISSUE_NUMBER}\n\n### 생성된 파일\n\${generatedFiles.map(f => '- \`' + f.path + '\`').join('\n')}\n\n### 계획 요약\n\${plan.summary || 'N/A'}\`,
-              head: branch,
+              title: '[FE] ' + result.jiraKey + ': Auto-generated Dashboard TODO App',
+              body: '## Claude Auto-Generated\n\n' +
+                '**JIRA:** ' + result.jiraKey + '\n' +
+                '**Issue:** #' + result.issueNumber + '\n\n' +
+                '### Generated Files\n' +
+                result.files.map(f => '- ' + f).join('\n') + '\n\n' +
+                '### Plan Summary\n' + (result.summary || 'N/A'),
+              head: result.branch,
               base: 'main'
             });
             console.log('PR created:', pr.data.html_url);
-
-            core.setOutput('fe_summary', plan.summary || 'Generated');
             core.setOutput('pr_url', pr.data.html_url);
             core.setOutput('pr_number', pr.data.number.toString());
-            core.setOutput('branch', branch);
+            core.setOutput('branch', result.branch);
+            core.setOutput('fe_summary', result.summary || 'Generated');
 
       - name: Install dependencies and build
         id: build
@@ -213,13 +155,13 @@ jobs:
         with:
           github_token: ${{ secrets.ORG_PAT }}
           publish_dir: ./dist
-          destination_dir: preview/${{ steps.claude_fe.outputs.branch }}
+          destination_dir: preview/${{ steps.create_pr.outputs.branch }}
           keep_files: true
 
       - name: Get preview URL
         id: preview
         run: |
-          BRANCH_NAME="${{ steps.claude_fe.outputs.branch }}"
+          BRANCH_NAME="${{ steps.create_pr.outputs.branch }}"
           PREVIEW_URL="https://org-pipeline-sophie.github.io/org-pipeline-sophie-fe/preview/${BRANCH_NAME}/"
           echo "preview_url=${PREVIEW_URL}" >> $GITHUB_OUTPUT
 
@@ -233,9 +175,9 @@ jobs:
             --arg docs_run "${{ inputs.docs_run_id }}" \
             --arg fe_run "${{ github.run_id }}" \
             --arg fe_sha "${{ github.sha }}" \
-            --arg summary "${{ steps.claude_fe.outputs.fe_summary }}" \
-            --arg pr_url "${{ steps.claude_fe.outputs.pr_url }}" \
-            --arg branch "${{ steps.claude_fe.outputs.branch }}" \
+            --arg summary "${{ steps.create_pr.outputs.fe_summary }}" \
+            --arg pr_url "${{ steps.create_pr.outputs.pr_url }}" \
+            --arg branch "${{ steps.create_pr.outputs.branch }}" \
             --arg preview_url "${{ steps.preview.outputs.preview_url }}" \
             '{"jira_issue_key":$jira,"github_issue_number":$issue,"be_run_id":$be_run,"docs_run_id":$docs_run,"fe_run_id":$fe_run,"fe_sha":$fe_sha,"status":"success","fe_summary":$summary,"pr_url":$pr_url,"branch":$branch,"preview_url":$preview_url}' \
             > fe-result/fe-summary.json
