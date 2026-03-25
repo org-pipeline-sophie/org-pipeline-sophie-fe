@@ -9,20 +9,24 @@ interface Props {
 }
 
 export function TodoList({ todos, onToggle, onDelete }: Props) {
-  if (todos.length === 0) {
-    return (
-      <div className="text-center py-8 text-gray-400">
-        <span className="text-4xl">📭</span>
-        <p className="mt-2">할 일이 없습니다</p>
-      </div>
-    );
-  }
-
   return (
-    <ul className="divide-y divide-gray-100">
-      {todos.map((todo) => (
-        <TodoItem key={todo.id} todo={todo} onToggle={onToggle} onDelete={onDelete} />
-      ))}
-    </ul>
+    <div className="bg-white rounded-lg shadow p-6">
+      {todos.length === 0 ? (
+        <div className="flex items-center justify-center py-12">
+          <p className="text-gray-400 text-lg">할 일이 없습니다</p>
+        </div>
+      ) : (
+        <ul className="space-y-0">
+          {todos.map((todo) => (
+            <TodoItem
+              key={todo.id}
+              todo={todo}
+              onToggle={onToggle}
+              onDelete={onDelete}
+            />
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
