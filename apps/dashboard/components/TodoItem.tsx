@@ -7,7 +7,7 @@ interface Props {
   onDelete: (id: string) => void;
 }
 
-export function TodoItem({ todo, onToggle, onDelete }: Props) {
+export const TodoItem: React.FC<Props> = ({ todo, onToggle, onDelete }) => {
   return (
     <li className="flex items-center gap-3 py-3 border-b border-gray-100 last:border-0">
       <input
@@ -16,7 +16,11 @@ export function TodoItem({ todo, onToggle, onDelete }: Props) {
         onChange={() => onToggle(todo.id)}
         className="w-4 h-4 accent-blue-500 cursor-pointer"
       />
-      <span className={`flex-1 text-sm ${todo.completed ? 'line-through text-gray-400' : 'text-gray-700'}`}>
+      <span
+        className={`flex-1 text-sm ${
+          todo.completed ? 'line-through text-gray-400' : 'text-gray-700'
+        }`}
+      >
         {todo.title}
       </span>
       <span className="text-xs text-gray-400">{todo.createdAt}</span>
@@ -29,4 +33,4 @@ export function TodoItem({ todo, onToggle, onDelete }: Props) {
       </button>
     </li>
   );
-}
+};
