@@ -1,0 +1,56 @@
+name: FE - E2E Test with agent-browser
+
+on:
+  workflow_dispatch:
+      inputs:
+            preview_url:
+                    description: 'Preview URL to test'
+                            required: false
+                                    default: 'https://org-pipeline-sophie.github.io/org-pipeline-sophie-fe/'
+                                      push:
+                                          branches: [main]
+                                              paths:
+                                                    - 'apps/**'
+                                                          - 'e2e/**'
+
+                                                          jobs:
+                                                            e2e-test:
+                                                                runs-on: ubuntu-latest
+                                                                    steps:
+                                                                          - name: Checkout FE repo
+                                                                                  uses: actions/checkout@v4
+
+                                                                                        - name: Setup Node.js
+                                                                                                uses: actions/setup-node@v4
+                                                                                                        with:
+                                                                                                                  node-version: '20'
+                                                                                                                  
+                                                                                                                        - name: Install agent-browser
+                                                                                                                                run: |
+                                                                                                                                          npm install -g agent-browser
+                                                                                                                                                    agent-browser install --with-deps
+                                                                                                                                                    
+                                                                                                                                                          - name: Install dependencies
+                                                                                                                                                                  run: |
+                                                                                                                                                                            if [ ! -f package.json ]; then
+                                                                                                                                                                                        echo '{"name":"fe","scripts":{"dev":"vite"},"dependencies":{"react":"^18.2.0","react-dom":"^18.2.0"},"devDependencies":{"vite":"^5.0.0","@vitejs/plugin-react":"^4.0.0","typescript":"^5.0.0","@types/react":"^18.2.0","@types/react-dom":"^18.2.0"}}' > package.json
+                                                                                                                                                                                                  fi
+                                                                                                                                                                                                            npm install --legacy-peer-deps || true
+                                                                                                                                                                                                            
+                                                                                                                                                                                                                  - name: Start dev server and run E2E tests
+                                                                                                                                                                                                                          run: |
+                                                                                                                                                                                                                                    npx vite --host 0.0.0.0 --port 5173 &
+                                                                                                                                                                                                                                              sleep 5
+                                                                                                                                                                                                                                                        TEST_URL="${{ inputs.preview_url || 'http://localhost:5173' }}"
+                                                                                                                                                                                                                                                                  chmod +x e2e/dashboard.test.sh
+                                                                                                                                                                                                                                                                            bash e2e/dashboard.test.sh "$TEST_URL"
+                                                                                                                                                                                                                                                                            
+                                                                                                                                                                                                                                                                                  - name: Upload E2E results
+                                                                                                                                                                                                                                                                                          if: always()
+                                                                                                                                                                                                                                                                                                  uses: actions/upload-artifact@v4
+                                                                                                                                                                                                                                                                                                          with:
+                                                                                                                                                                                                                                                                                                                    name: e2e-results
+                                                                                                                                                                                                                                                                                                                              path: |
+                                                                                                                                                                                                                                                                                                                                          e2e-results.json
+                                                                                                                                                                                                                                                                                                                                                      e2e-result.png
+                                                                                                                                                                                                                                                                                                                                                                if-no-files-found: ignore
